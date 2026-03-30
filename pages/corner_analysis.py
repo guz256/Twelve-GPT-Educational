@@ -1,6 +1,8 @@
-# Library imports
+﻿# Library imports
 from pathlib import Path
 import json
+import re
+import unicodedata
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,6 +13,8 @@ from mplsoccer import VerticalPitch
 from scipy.ndimage import gaussian_filter
 
 from utils.page_components import add_common_page_elements
+from classes.corner_description import CornerDescription
+from classes.corner_chat import CornerChat
 
 
 RAW_EVENTS_DIR = Path("data/raw/statsbomb/events")
@@ -934,17 +938,16 @@ def _build_quality_scores(context_df: pd.DataFrame) -> pd.DataFrame:
     # Raw quality features from your definitions
     d["q_target_zone"] = d["near_post_pct"] - d["far_post_pct"]
     d["q_shot_goal_threat"] = (
-        d["assist_xg_per_corner"] * 0.5
-        + d["goal_assist_rate"] * 0.3
-        + d["shot_assist_rate"] * 0.2
+        d["assist_xg_per_corner"] * 0.55
+        + d["goal_assist_rate"] * 0.15
+        + d["shot_assist_rate"] * 0.30
     )
     # Positive side -> stronger phase 1 profile, Negative side -> stronger phase 2 profile.
     d["q_threat_style"] = d["corner_phase1_xg_per_match"] - d["corner_phase2_xg_per_match"]
-    d["q_style_identity"] = (
-        d["inswing_pct"] * 0.34
-        + d["short_pct"] * 0.33
-        + d["outswing_pct"] * 0.33
-    )
+    # Positive side -> short-corner dominant profile, Negative side -> direct-corner dominant profile.
+    d["q_short_vs_direct"] = d["short_pct"] - (100.0 - d["short_pct"])
+    # Positive side -> open-foot dominant delivery (outswing), Negative side -> closed-foot dominant delivery (inswing).
+    d["q_open_vs_closed"] = d["outswing_pct"] - d["inswing_pct"]
     d["q_header_threat"] = d["team_top5_hops"]
     # Lower transition risk is better -> invert sign
     d["q_transition_risk"] = -d["risk_obv_against_per_corner"]
@@ -953,7 +956,8 @@ def _build_quality_scores(context_df: pd.DataFrame) -> pd.DataFrame:
         "q_target_zone",
         "q_shot_goal_threat",
         "q_threat_style",
-        "q_style_identity",
+        "q_short_vs_direct",
+        "q_open_vs_closed",
         "q_header_threat",
         "q_transition_risk",
     ]
@@ -980,7 +984,8 @@ def _plot_quality_reference(quality_df: pd.DataFrame, selected_team: str):
         ("q_target_zone", "Target zone"),
         ("q_shot_goal_threat", "Shot-goal threat"),
         ("q_threat_style", "Threat style"),
-        ("q_style_identity", "Style identity"),
+        ("q_short_vs_direct", "Short vs direct"),
+        ("q_open_vs_closed", "Open vs closed"),
         ("q_header_threat", "Header threat"),
         ("q_transition_risk", "Transition risk"),
     ]
@@ -1011,7 +1016,7 @@ def _plot_quality_reference(quality_df: pd.DataFrame, selected_team: str):
     return fig
 
 
-def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str):
+def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str, compare_team=None):
     if quality_df.empty:
         return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_point()
 
@@ -1019,7 +1024,8 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str)
         ("q_target_zone", "Target zone"),
         ("q_shot_goal_threat", "Shot-goal threat"),
         ("q_threat_style", "Threat style"),
-        ("q_style_identity", "Style identity"),
+        ("q_short_vs_direct", "Short vs direct"),
+        ("q_open_vs_closed", "Open vs closed"),
         ("q_header_threat", "Header threat"),
         ("q_transition_risk", "Transition risk"),
     ]
@@ -1041,13 +1047,15 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str)
                     "x_raw": x_raw,
                     "x_plot": x_snap,
                     "is_selected": str(r["team_name"]) == str(selected_team),
+                    "is_compare": (compare_team is not None) and (str(r["team_name"]) == str(compare_team)),
                 }
             )
     if not rows:
         return alt.Chart(pd.DataFrame({"x": [], "y": []})).mark_point()
 
     df = pd.DataFrame(rows)
-    league = df[~df["is_selected"]].copy()
+    league = df[(~df["is_selected"]) & (~df["is_compare"])].copy()
+    compare = df[df["is_compare"]].copy()
     selected = df[df["is_selected"]].copy()
 
     x_enc = alt.X(
@@ -1089,7 +1097,8 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str)
         "Target zone": ("More far-post profile", "More near-post profile"),
         "Shot-goal threat": ("Lower shot/xG/goal-assist threat", "Higher shot/xG/goal-assist threat"),
         "Threat style": ("Phase 2 dominant profile", "Phase 1 dominant profile"),
-        "Style identity": ("Lower short+inswing+outswing profile", "Higher short+inswing+outswing profile"),
+        "Short vs direct": ("More direct-corner profile", "More short-corner profile"),
+        "Open vs closed": ("More closed-foot delivery", "More open-foot delivery"),
         "Header threat": ("Weaker aerial threat (Top-5 HOPS)", "Stronger aerial threat (Top-5 HOPS)"),
         "Transition risk": ("Higher post-corner transition risk", "Lower post-corner transition risk"),
     }
@@ -1149,8 +1158,22 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str)
         )
     )
 
+    compare_points = (
+        alt.Chart(compare)
+        .mark_square(size=155, color="#f59e0b", stroke="#7c2d12", strokeWidth=1)
+        .encode(
+            x=x_enc,
+            y=y_enc,
+            tooltip=[
+                alt.Tooltip("team_name:N", title="Team"),
+                alt.Tooltip("quality:N", title="Quality"),
+                alt.Tooltip("x_raw:Q", title="z-score", format=".2f"),
+            ],
+        )
+    )
+
     chart = (
-        alt.layer(h_rules, league_points, selected_points, cat_labels, left_meanings, right_meanings)
+        alt.layer(h_rules, league_points, compare_points, selected_points, cat_labels, left_meanings, right_meanings)
         .properties(
             width=1180,
             height=620,
@@ -1163,6 +1186,77 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str)
     return chart
 
 
+def _infer_comparison_team_from_prompt(user_prompt: str, available_teams: list, selected_team: str):
+    def _normalize_team_text(text: str) -> str:
+        txt = str(text or "").lower()
+        txt = "".join(ch for ch in unicodedata.normalize("NFKD", txt) if not unicodedata.combining(ch))
+        txt = re.sub(r"[^a-z0-9\s]", " ", txt)
+        txt = re.sub(r"\s+", " ", txt).strip()
+        return txt
+
+    def _team_aliases(team_name: str) -> set:
+        stop_tokens = {
+            "ca",
+            "club",
+            "atletico",
+            "fc",
+            "cf",
+            "sc",
+            "cd",
+            "de",
+            "del",
+            "la",
+            "el",
+            "los",
+            "las",
+        }
+        norm = _normalize_team_text(team_name)
+        if not norm:
+            return set()
+        tokens = norm.split()
+        core = [t for t in tokens if t not in stop_tokens]
+
+        aliases = {norm}
+        if core:
+            aliases.add(" ".join(core))
+        if len(core) == 1 and len(core[0]) >= 4:
+            aliases.add(core[0])
+        if len(core) >= 2:
+            aliases.add(" ".join(core[:2]))
+            aliases.add(" ".join(core[-2:]))
+        return {a for a in aliases if len(a) >= 3}
+
+    prompt = _normalize_team_text(user_prompt)
+    if not prompt:
+        return None
+
+    comparison_tokens = ["compare", "comparar", "compara", "vs", "versus", "contra", "frente a"]
+    if not any(tok in prompt for tok in comparison_tokens):
+        return None
+
+    selected_norm = _normalize_team_text(selected_team)
+    alias_bag = {}
+    for team in available_teams:
+        team_txt = str(team)
+        team_norm = _normalize_team_text(team_txt)
+        if team_txt == str(selected_team) or team_norm == selected_norm:
+            continue
+        for alias in _team_aliases(team_txt):
+            alias_bag.setdefault(alias, set()).add(team_txt)
+
+    # Keep only aliases that map to exactly one team to avoid ambiguous short names.
+    alias_to_team = {alias: list(teams)[0] for alias, teams in alias_bag.items() if len(teams) == 1}
+
+    candidates = []
+    for alias, team_txt in alias_to_team.items():
+        pattern = rf"(?<!\w){re.escape(alias)}(?!\w)"
+        for m in re.finditer(pattern, prompt):
+            candidates.append((m.start(), -len(alias), team_txt))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][2]
+
 def _plot_quality_reference_interactive(quality_df: pd.DataFrame, selected_team: str):
     if quality_df.empty:
         return go.Figure()
@@ -1171,7 +1265,8 @@ def _plot_quality_reference_interactive(quality_df: pd.DataFrame, selected_team:
         ("q_target_zone", "Target zone"),
         ("q_shot_goal_threat", "Shot-goal threat"),
         ("q_threat_style", "Threat style"),
-        ("q_style_identity", "Style identity"),
+        ("q_short_vs_direct", "Short vs direct"),
+        ("q_open_vs_closed", "Open vs closed"),
         ("q_header_threat", "Header threat"),
         ("q_transition_risk", "Transition risk"),
     ]
@@ -2057,6 +2152,229 @@ def _build_corner_dashboard_page(events: pd.DataFrame, team_name: str, n_seconds
     return fig
 
 
+def _build_quality_explained_report(context_df: pd.DataFrame, selected_team: str) -> str:
+    q_df = _build_quality_scores(context_df)
+    if q_df.empty or "team_name" not in q_df.columns:
+        return "No quality data available for textual report."
+
+    row = q_df[q_df["team_name"].astype(str) == str(selected_team)]
+    if row.empty:
+        return f"No quality row available for {selected_team}."
+    r = row.iloc[0]
+
+    quality_specs = [
+        ("q_target_zone", "Target zone", "More far-post profile", "More near-post profile"),
+        ("q_shot_goal_threat", "Shot-goal threat", "Lower shot/xG/goal-assist threat", "Higher shot/xG/goal-assist threat"),
+        ("q_threat_style", "Threat style", "Phase 2 dominant profile", "Phase 1 dominant profile"),
+        ("q_short_vs_direct", "Short vs direct", "More direct-corner profile", "More short-corner profile"),
+        ("q_open_vs_closed", "Open vs closed", "More closed-foot delivery", "More open-foot delivery"),
+        ("q_header_threat", "Header threat", "Weaker aerial threat (Top-5 HOPS)", "Stronger aerial threat (Top-5 HOPS)"),
+        ("q_transition_risk", "Transition risk", "Higher post-corner transition risk", "Lower post-corner transition risk"),
+    ]
+
+    def _band(v: float) -> str:
+        if v >= 1.0:
+            return "Strong"
+        if v >= 0.35:
+            return "Moderate"
+        if v <= -1.0:
+            return "Strong"
+        if v <= -0.35:
+            return "Moderate"
+        return "Neutral"
+
+    lines = ["Quality-by-quality report"]
+    for col, label, neg_txt, pos_txt in quality_specs:
+        v = float(pd.to_numeric(r.get(col), errors="coerce"))
+        side_txt = pos_txt if v > 0 else neg_txt if v < 0 else "Balanced profile"
+        lines.append(f"- {label}: {_band(v)} signal ({v:+.2f} z). {side_txt}.")
+    return "\n".join(lines)
+
+
+def _build_quality_positioning_text(context_df: pd.DataFrame, selected_team: str) -> str:
+    q_df = _build_quality_scores(context_df)
+    if q_df.empty or "team_name" not in q_df.columns:
+        return "No quality positioning data available."
+
+    quality_specs = [
+        ("q_target_zone", "Target zone"),
+        ("q_shot_goal_threat", "Shot-goal threat"),
+        ("q_threat_style", "Threat style"),
+        ("q_short_vs_direct", "Short vs direct"),
+        ("q_open_vs_closed", "Open vs closed"),
+        ("q_header_threat", "Header threat"),
+        ("q_transition_risk", "Transition risk"),
+    ]
+    n = int(len(q_df))
+    if n <= 1:
+        return "Not enough teams to compute league positioning."
+
+    lines = ["League positioning by quality"]
+    for col, label in quality_specs:
+        d = q_df[["team_name", col]].copy()
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+        d = d.dropna(subset=[col])
+        if d.empty or str(selected_team) not in d["team_name"].astype(str).tolist():
+            continue
+        d = d.sort_values(col, ascending=False).reset_index(drop=True)
+        d["rank"] = np.arange(1, len(d) + 1)
+        row = d[d["team_name"].astype(str) == str(selected_team)].iloc[0]
+        rank = int(row["rank"])
+        val = float(row[col])
+        lines.append(f"- {label}: rank {rank}/{len(d)} ({val:+.2f} z).")
+    return "\n".join(lines)
+
+
+def _build_corner_wordalisation_context(
+    selected_team: str,
+    context_df: pd.DataFrame,
+    off_corners: pd.DataFrame,
+    def_corners: pd.DataFrame,
+    events: pd.DataFrame,
+    lineups: pd.DataFrame,
+) -> str:
+    n_off = int(len(off_corners))
+    n_def = int(len(def_corners))
+
+    short_pct = float(off_corners["is_short"].mean() * 100.0) if "is_short" in off_corners.columns and n_off > 0 else 0.0
+    inswing_pct = float(off_corners["is_inswing"].mean() * 100.0) if "is_inswing" in off_corners.columns and n_off > 0 else 0.0
+    outswing_pct = float(off_corners["is_outswing"].mean() * 100.0) if "is_outswing" in off_corners.columns and n_off > 0 else 0.0
+    mixed_pct = max(0.0, 100.0 - inswing_pct - outswing_pct - short_pct)
+
+    zone_counts = (
+        off_corners["target_zone"].astype(str).value_counts(normalize=True) * 100.0
+        if "target_zone" in off_corners.columns and n_off > 0
+        else pd.Series(dtype=float)
+    )
+    near_pct = float(zone_counts.get("near_post", 0.0))
+    central_pct = float(zone_counts.get("central", 0.0))
+    far_pct = float(zone_counts.get("far_post", 0.0))
+    edge_box_pct = float(zone_counts.get("short", 0.0))
+
+    first_contact_rate = float(off_corners["pass_recipient_name"].notna().mean() * 100.0) if "pass_recipient_name" in off_corners.columns and n_off > 0 else 0.0
+    shot_rate = float(off_corners["corner_shot_assist"].mean()) if "corner_shot_assist" in off_corners.columns and n_off > 0 else 0.0
+    xg_per_corner = float(off_corners["assist_xg"].mean()) if "assist_xg" in off_corners.columns and n_off > 0 else 0.0
+    total_xg = float(off_corners["assist_xg"].sum()) if "assist_xg" in off_corners.columns and n_off > 0 else 0.0
+
+    shots_corner_for = events[
+        (events["team_name"].astype(str) == str(selected_team))
+        & (events["event_type_name"].astype(str) == "Shot")
+        & (events["play_pattern_name"].astype(str) == "From Corner")
+    ].copy()
+    shots_corner_against = events[
+        (events["team_name"].astype(str) != str(selected_team))
+        & (events["event_type_name"].astype(str) == "Shot")
+        & (events["play_pattern_name"].astype(str) == "From Corner")
+    ].copy()
+
+    shots_corner_for["set_piece_phase"] = pd.to_numeric(shots_corner_for.get("set_piece_phase"), errors="coerce")
+    shots_corner_against["shot_xg"] = pd.to_numeric(shots_corner_against.get("shot_statsbomb_xg"), errors="coerce").fillna(0.0)
+
+    phase2_share = float((shots_corner_for["set_piece_phase"] == 2.0).mean() * 100.0) if len(shots_corner_for) > 0 else 0.0
+    conceded_xg_total = float(shots_corner_against["shot_xg"].sum()) if not shots_corner_against.empty else 0.0
+    conceded_xg_per_opp_corner = (conceded_xg_total / n_def) if n_def > 0 else 0.0
+    conceded_body_part = (
+        shots_corner_against["shot_body_part_name"].astype(str).value_counts(normalize=True).mul(100.0).head(3).to_dict()
+        if not shots_corner_against.empty and "shot_body_part_name" in shots_corner_against.columns
+        else {}
+    )
+    q_df = _build_quality_scores(context_df)
+    q_cols = [
+        "team_name",
+        "q_target_zone",
+        "q_shot_goal_threat",
+        "q_threat_style",
+        "q_short_vs_direct",
+        "q_open_vs_closed",
+        "q_header_threat",
+        "q_transition_risk",
+    ]
+    q_cols = [c for c in q_cols if c in q_df.columns]
+    league_quality_table = q_df[q_cols].copy() if q_cols else pd.DataFrame()
+    if not league_quality_table.empty:
+        for col in [c for c in q_cols if c != "team_name"]:
+            league_quality_table[col] = pd.to_numeric(league_quality_table[col], errors="coerce").round(3)
+        league_quality_table = league_quality_table.rename(
+            columns={
+                "team_name": "team",
+                "q_target_zone": "target zone tendency",
+                "q_shot_goal_threat": "shot and chance threat",
+                "q_threat_style": "first-contact vs second-phase threat",
+                "q_short_vs_direct": "short vs direct tendency",
+                "q_open_vs_closed": "open vs closed delivery tendency",
+                "q_header_threat": "aerial threat",
+                "q_transition_risk": "transition protection after corners",
+            }
+        )
+
+    metric_cols = [
+        "team_name",
+        "corners_per_match",
+        "short_pct",
+        "inswing_pct",
+        "outswing_pct",
+        "near_post_pct",
+        "central_pct",
+        "far_post_pct",
+        "shot_assist_rate",
+        "goal_assist_rate",
+        "assist_xg_per_corner",
+        "corner_phase1_xg_per_match",
+        "corner_phase2_xg_per_match",
+        "risk_obv_against_per_corner",
+        "team_top5_hops",
+        "team_hops_weighted",
+    ]
+    metric_cols = [c for c in metric_cols if c in context_df.columns]
+    league_metric_table = context_df[metric_cols].copy() if metric_cols else pd.DataFrame()
+    if not league_metric_table.empty:
+        for col in [c for c in metric_cols if c != "team_name"]:
+            league_metric_table[col] = pd.to_numeric(league_metric_table[col], errors="coerce").round(3)
+        league_metric_table = league_metric_table.rename(
+            columns={
+                "team_name": "team",
+                "corners_per_match": "corners per match",
+                "short_pct": "short-corner share (%)",
+                "inswing_pct": "inswing share (%)",
+                "outswing_pct": "outswing share (%)",
+                "near_post_pct": "near-post target share (%)",
+                "central_pct": "central target share (%)",
+                "far_post_pct": "far-post target share (%)",
+                "shot_assist_rate": "shots created per corner",
+                "goal_assist_rate": "goals assisted per corner",
+                "assist_xg_per_corner": "xG created per corner",
+                "corner_phase1_xg_per_match": "initial-delivery threat per match",
+                "corner_phase2_xg_per_match": "second-ball threat per match",
+                "risk_obv_against_per_corner": "transition danger conceded per corner",
+                "team_top5_hops": "team aerial threat (top-5 HOPS)",
+                "team_hops_weighted": "team aerial threat (weighted HOPS)",
+            }
+        )
+
+    available_teams = (
+        sorted(context_df["team_name"].dropna().astype(str).unique().tolist())
+        if "team_name" in context_df.columns
+        else []
+    )
+
+    return (
+        f"Team: {selected_team}\n"
+        f"Available teams in context ({len(available_teams)}): {available_teams}\n"
+        f"Corner sample sizes: offensive corners={n_off}, defensive corners faced={n_def}\n"
+        f"Delivery profile (%): short={short_pct:.1f}, inswing={inswing_pct:.1f}, outswing={outswing_pct:.1f}, mixed={mixed_pct:.1f}\n"
+        "Open/Closed mapping: open means outswing, closed means inswing.\n"
+        f"Target zones (%): near post={near_pct:.1f}, central={central_pct:.1f}, far post={far_pct:.1f}, edge of box/short-target proxy={edge_box_pct:.1f}\n"
+        f"First contact success signal: rate={first_contact_rate:.1f}%\n"
+        f"Chance generation: shots per corner={shot_rate:.3f}, xG per corner={xg_per_corner:.3f}, total corner-assisted xG={total_xg:.3f}\n"
+        f"Second-phase reliance: share of corner shots in second-phase situations={phase2_share:.1f}%\n"
+        f"Defensive outcomes after own corners: total xG conceded from opponent corners={conceded_xg_total:.3f}, xG conceded per opponent corner={conceded_xg_per_opp_corner:.3f}, conceded shot body-part profile={conceded_body_part}\n"
+        f"League quality table (all teams): {league_quality_table.to_dict(orient='records') if not league_quality_table.empty else []}\n"
+        f"League metric table (all teams): {league_metric_table.to_dict(orient='records') if not league_metric_table.empty else []}\n"
+        "Definitions: phase 1 is first-contact play from the initial delivery; phase 2 is second-ball/recycled play after first contact.\n"
+        "Data caveats: defensive structure (zonal/man/hybrid), blocker roles, and explicit second-ball recoveries are not directly tagged in this dataset."
+    )
+
+
 sidebar_container = add_common_page_elements()
 page_container = st.sidebar.container()
 sidebar_container = st.sidebar.container()
@@ -2178,6 +2496,7 @@ tabs = st.tabs(
         "HOPS",
         "xG Scatter",
         "Raw Data",
+        "Wordalisation",
     ]
 )
 
@@ -2272,7 +2591,8 @@ with tabs[0]:
                         "q_target_zone": "Target zone",
                         "q_shot_goal_threat": "Shot-goal threat",
                         "q_threat_style": "Threat style",
-                        "q_style_identity": "Style identity",
+                        "q_short_vs_direct": "Short vs direct",
+                        "q_open_vs_closed": "Open vs closed",
                         "q_header_threat": "Header threat",
                         "q_transition_risk": "Transition risk",
                     }
@@ -2670,3 +2990,116 @@ with tabs[7]:
         ]
         def_cols = [c for c in def_cols if c in def_corners.columns]
         st.dataframe(def_corners[def_cols].sort_values(["match_id", "minute"]), use_container_width=True)
+
+with tabs[8]:
+    st.subheader("Corner Wordalisation")
+    st.caption("LLM-based tactical wordalisation from corner event metrics with transparent transcript.")
+    try:
+        with open("model cards/model-card-corner-analysis.md", "r", encoding="utf8") as file:
+            corner_model_card_text = file.read()
+        st.expander("Model card for Corner Analysis", expanded=False).markdown(corner_model_card_text)
+    except Exception:
+        st.info("Model card file not found: model cards/model-card-corner-analysis.md")
+
+    context_text = _build_corner_wordalisation_context(
+        selected_team=selected_team,
+        context_df=context_df,
+        off_corners=off_corners,
+        def_corners=def_corners,
+        events=events,
+        lineups=lineups,
+    )
+    chat_state_key = f"corner_wordalisation_messages::{selected_team}::{hash(tuple(sorted(selected_ids)))}"
+    corner_description = CornerDescription(team_name=selected_team, context_text=context_text)
+    corner_chat = CornerChat(state_key=chat_state_key, description=corner_description)
+
+    with st.expander("Dataframe used", expanded=False):
+        used_cols = [
+            "team_name",
+            "corners",
+            "corners_per_match",
+            "short_pct",
+            "inswing_pct",
+            "outswing_pct",
+            "near_post_pct",
+            "central_pct",
+            "far_post_pct",
+            "shot_assist_rate",
+            "goal_assist_rate",
+            "assist_xg_per_corner",
+            "corner_phase1_xg_per_match",
+            "corner_phase2_xg_per_match",
+            "risk_obv_against_per_corner",
+            "risk_reward_index",
+            "team_top5_hops",
+            "team_hops_weighted",
+        ]
+        used_cols = [c for c in used_cols if c in context_df.columns]
+        st.dataframe(
+            context_df[used_cols].sort_values("team_name"),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        if st.button("Generate example report", key="corner_wordalisation_example_btn"):
+            example_query = (
+                f"Generate a concise corner analysis report for {selected_team}. "
+                "Use short paragraphs and focus on measurable strengths, inefficiencies, and tactical implications."
+            )
+            with st.spinner("Generating wordalisation..."):
+                try:
+                    corner_chat.ask(example_query)
+                except Exception as e:
+                    st.error(f"Wordalisation failed: {e}")
+    with col_b:
+        st.download_button(
+            "Download context snapshot",
+            data=context_text,
+            file_name=f"corner_wordalisation_context_{selected_team}.txt",
+            mime="text/plain",
+            key="corner_wordalisation_download_context",
+        )
+
+    available_teams = (
+        context_df["team_name"].dropna().astype(str).unique().tolist()
+        if "team_name" in context_df.columns
+        else []
+    )
+    q_word_df = _build_quality_scores(context_df)
+
+    for i, msg in enumerate(corner_chat.history):
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+            if msg.get("role") == "assistant" and not q_word_df.empty:
+                prev_user_prompt = ""
+                if i > 0 and corner_chat.history[i - 1].get("role") == "user":
+                    prev_user_prompt = str(corner_chat.history[i - 1].get("content", ""))
+                compare_team = _infer_comparison_team_from_prompt(prev_user_prompt, available_teams, selected_team)
+                st.markdown("**Team Quality Visual**")
+                if compare_team:
+                    st.caption(f"Comparison highlight: {selected_team} (white) vs {compare_team} (orange)")
+                st.altair_chart(
+                    _plot_quality_reference_altair(q_word_df, selected_team, compare_team=compare_team),
+                    use_container_width=True,
+                )
+
+    with st.expander("Chat transcript", expanded=False):
+        if corner_chat.last_transcript:
+            st.write(corner_chat.last_transcript)
+        else:
+            st.info("No transcript yet. Generate an example report or send a chat message.")
+
+    user_prompt = st.chat_input(
+        f"Ask about {selected_team} corners (e.g. How does {selected_team} take corners?)",
+        key="corner_wordalisation_chat_input",
+    )
+    if user_prompt:
+        with st.spinner("Generating wordalisation..."):
+            try:
+                corner_chat.ask(user_prompt)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Wordalisation failed: {e}")
+
