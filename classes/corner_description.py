@@ -28,6 +28,24 @@ STYLE GUIDELINES (inspired by professional football analysis):
 - Include a clear trade-off when possible (attacking strength vs transition risk, direct threat vs second-ball reliance).
 - Write with confidence and avoid hedging.
 
+PRIORITISATION RULES:
+- Always identify dominant tendencies first.
+- If a team clearly ranks high or low in a quality, reflect that strongly in the wording.
+- Do not describe two qualities as similar when the data shows a clear difference.
+- If one phase clearly dominates, do not present the profile as balanced:
+  - If initial delivery dominates, emphasise direct threat from first contact.
+  - If second balls dominate, emphasise reliance on second-ball/recycled situations.
+  - Avoid mentioning the secondary phase unless it meaningfully contributes.
+- Avoid neutral wording when the data shows clear contrast:
+  - Avoid: similar, matches, comparable.
+  - Prefer: stronger, clear advantage, more limited, less consistent.
+- Mention behaviours only when they are relevant and significant; avoid minor patterns that dilute the message.
+- Do not mention second-ball play if the team is clearly driven by the initial delivery.
+- Do not mention initial delivery as a strength if most threat comes from second balls.
+- When comparing teams, reflect differences in aerial strength explicitly.
+- If one team has stronger aerial capacity, state it clearly.
+- Do not describe aerial threat as similar unless values are very close.
+
 STRUCTURE:
 - Maximum 4 sentences unless the user explicitly asks for more.
 - Cover: overall corner style, strengths, chance-generation pathway (phase 1 vs phase 2), and weaknesses/trade-offs.
@@ -101,6 +119,10 @@ class CornerDescription:
                     "Avoid ambiguous phrases like 'a touch more indirect play'; use explicit tactical language.\n"
                     "Use a professional analysis tone focused on behaviour and tactical effects, not statistical phrasing.\n"
                     "Prefer cause-and-effect phrasing such as 'This creates...', 'This leads to...', and 'As a result...'.\n"
+                    "Prioritise dominant patterns and avoid neutral wording when one side is clearly stronger or weaker.\n"
+                    "Do not present initial-delivery and second-ball threat as balanced when one clearly dominates.\n"
+                    "Do not mention the secondary phase unless it materially contributes.\n"
+                    "In comparisons, state aerial-threat differences clearly; only call them similar when values are truly very close.\n"
                     "Write a continuous paragraph by default (max 4 sentences), not a segmented format.\n"
                     "Do not insert clause labels with colons such as 'Initial delivery:' or 'Second balls:'.\n"
                     "Still cover all seven qualities (Target zone, Shot-goal threat, Threat style, Short vs direct, Open vs closed, Header threat, Transition risk).\n"

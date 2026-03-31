@@ -23,6 +23,12 @@ RAW_LINEUPS_DIR = Path("data/raw/statsbomb/lineups")
 COMPETITION_ID = 111
 SEASON_ID = 316
 TRANSITION_WINDOW_S = 10
+VISUAL_Z_MIN = -2.0
+VISUAL_Z_MAX = 2.0
+VISUAL_X_PAD = 0.25
+HIGH = 0.6
+LOW = -0.6
+CLEAR_DIFF = 0.75
 
 
 def _parse_json(value):
@@ -969,6 +975,67 @@ def _build_quality_scores(context_df: pd.DataFrame) -> pd.DataFrame:
     return q_df
 
 
+def _label_quality(z, high: float = HIGH, low: float = LOW) -> str:
+    try:
+        v = float(pd.to_numeric(z, errors="coerce"))
+    except Exception:
+        return "unknown"
+    if not np.isfinite(v):
+        return "unknown"
+    if v >= float(high):
+        return "high"
+    if v <= float(low):
+        return "low"
+    return "average"
+
+
+def _compare_quality(z_team, z_opp, clear_diff: float = CLEAR_DIFF) -> str:
+    try:
+        diff = float(pd.to_numeric(z_team, errors="coerce")) - float(pd.to_numeric(z_opp, errors="coerce"))
+    except Exception:
+        return "unknown"
+    if not np.isfinite(diff):
+        return "unknown"
+    if diff >= float(clear_diff):
+        return "clear_advantage"
+    if diff <= -float(clear_diff):
+        return "clear_disadvantage"
+    return "balanced"
+
+
+def _target_zone_style_label(near_pct, central_pct, far_pct) -> str:
+    near = float(pd.to_numeric(near_pct, errors="coerce")) if pd.notna(near_pct) else np.nan
+    central = float(pd.to_numeric(central_pct, errors="coerce")) if pd.notna(central_pct) else np.nan
+    far = float(pd.to_numeric(far_pct, errors="coerce")) if pd.notna(far_pct) else np.nan
+    if not all(np.isfinite(v) for v in [near, central, far]):
+        return "unknown"
+
+    # Target zone is orientation, not quality: near-post, far-post, or mixed/central emphasis.
+    diff = near - far
+    if central >= max(near, far) and central >= 30.0:
+        return "central-oriented / mixed"
+    if abs(diff) < 8.0 and central >= 25.0:
+        return "mixed profile with central usage"
+    if diff >= 8.0:
+        return "near-post oriented"
+    if diff <= -8.0:
+        return "far-post oriented"
+    return "balanced near/far profile"
+
+
+def _quality_level_text(quality_key: str, z_value) -> str:
+    lvl = _label_quality(z_value, high=HIGH, low=LOW)
+    mapping = {
+        "q_shot_goal_threat": {"high": "strong threat output", "average": "average threat output", "low": "limited threat output"},
+        "q_threat_style": {"high": "initial-delivery dominant", "average": "balanced phase profile", "low": "second-ball dominant"},
+        "q_short_vs_direct": {"high": "short-corner leaning", "average": "mixed short/direct", "low": "direct-corner leaning"},
+        "q_open_vs_closed": {"high": "open-foot leaning", "average": "mixed open/closed", "low": "closed-foot leaning"},
+        "q_header_threat": {"high": "strong aerial threat", "average": "average aerial threat", "low": "limited aerial threat"},
+        "q_transition_risk": {"high": "strong transition protection", "average": "average transition protection", "low": "higher transition exposure"},
+    }
+    return mapping.get(quality_key, {}).get(lvl, "unknown")
+
+
 def _plot_quality_reference(quality_df: pd.DataFrame, selected_team: str):
     fig, ax = plt.subplots(figsize=(12, 7))
     bg = "#062f27"
@@ -993,18 +1060,18 @@ def _plot_quality_reference(quality_df: pd.DataFrame, selected_team: str):
     y = np.arange(len(labels))[::-1]
     for i, (col, label) in enumerate(labels):
         yy = y[i]
-        x = pd.to_numeric(quality_df[col], errors="coerce").dropna()
+        x = pd.to_numeric(quality_df[col], errors="coerce").dropna().clip(lower=VISUAL_Z_MIN, upper=VISUAL_Z_MAX)
         # league dots
         ax.scatter(x, np.full(len(x), yy), s=38, color="#3aa76d", alpha=0.32, edgecolors="none")
         # selected team square
         t = quality_df[quality_df["team_name"].astype(str) == str(selected_team)]
         if not t.empty:
-            tx = float(t.iloc[0][col])
+            tx = float(np.clip(float(t.iloc[0][col]), VISUAL_Z_MIN, VISUAL_Z_MAX))
             ax.scatter([tx], [yy], s=70, marker="s", color="#f3f4f6", edgecolors="#111827", linewidth=0.8, zorder=4)
-        ax.text(-3.35, yy, label, color="#e5e7eb", fontsize=11, va="center", ha="left")
+        ax.text(VISUAL_Z_MIN - VISUAL_X_PAD + 0.02, yy, label, color="#e5e7eb", fontsize=11, va="center", ha="left")
 
     ax.axvline(0, color="#94a3b8", linewidth=1.2, alpha=0.7)
-    ax.set_xlim(-3.2, 3.2)
+    ax.set_xlim(VISUAL_Z_MIN - VISUAL_X_PAD, VISUAL_Z_MAX + VISUAL_X_PAD)
     ax.set_ylim(-1, len(labels))
     ax.set_yticks([])
     ax.set_xticks([-2, 0, 2])
@@ -1038,7 +1105,7 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str,
         tmp = tmp.dropna(subset=[col])
         for _, r in tmp.iterrows():
             x_raw = float(r[col])
-            x = max(-2.8, min(2.8, x_raw))
+            x = max(VISUAL_Z_MIN, min(VISUAL_Z_MAX, x_raw))
             x_snap = round(x / 0.10) * 0.10
             rows.append(
                 {
@@ -1060,7 +1127,7 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str,
 
     x_enc = alt.X(
         "x_plot:Q",
-        scale=alt.Scale(domain=[-3, 3]),
+        scale=alt.Scale(domain=[VISUAL_Z_MIN - VISUAL_X_PAD, VISUAL_Z_MAX + VISUAL_X_PAD]),
         axis=alt.Axis(
             values=[-2, 0, 2],
             labelExpr="datum.value == -2 ? 'Worse' : datum.value == 0 ? 'Average' : datum.value == 2 ? 'Better' : ''",
@@ -1087,7 +1154,7 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str,
         alt.Chart(cat_labels_df)
         .mark_text(color="#dce7e3", fontSize=15, fontWeight="bold", align="center", baseline="bottom", dy=-18)
         .encode(
-            x=alt.X("x:Q", scale=alt.Scale(domain=[-3, 3]), axis=None),
+            x=alt.X("x:Q", scale=alt.Scale(domain=[VISUAL_Z_MIN - VISUAL_X_PAD, VISUAL_Z_MAX + VISUAL_X_PAD]), axis=None),
             y=alt.Y("quality:N", sort=quality_order),
             text="quality:N",
         )
@@ -1105,8 +1172,8 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str,
     meanings_df = pd.DataFrame(
         {
             "quality": quality_order,
-            "x_left": [-2.95] * len(quality_order),
-            "x_right": [2.95] * len(quality_order),
+            "x_left": [VISUAL_Z_MIN - VISUAL_X_PAD + 0.02] * len(quality_order),
+            "x_right": [VISUAL_Z_MAX + VISUAL_X_PAD - 0.02] * len(quality_order),
             "left_txt": [side_meanings[q][0] for q in quality_order],
             "right_txt": [side_meanings[q][1] for q in quality_order],
         }
@@ -1115,7 +1182,7 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str,
         alt.Chart(meanings_df)
         .mark_text(color="#a9c4bd", fontSize=10.5, align="left", baseline="top", dy=10)
         .encode(
-            x=alt.X("x_left:Q", scale=alt.Scale(domain=[-3, 3]), axis=None),
+            x=alt.X("x_left:Q", scale=alt.Scale(domain=[VISUAL_Z_MIN - VISUAL_X_PAD, VISUAL_Z_MAX + VISUAL_X_PAD]), axis=None),
             y=alt.Y("quality:N", sort=quality_order),
             text="left_txt:N",
         )
@@ -1124,7 +1191,7 @@ def _plot_quality_reference_altair(quality_df: pd.DataFrame, selected_team: str,
         alt.Chart(meanings_df)
         .mark_text(color="#a9c4bd", fontSize=10.5, align="right", baseline="top", dy=10)
         .encode(
-            x=alt.X("x_right:Q", scale=alt.Scale(domain=[-3, 3]), axis=None),
+            x=alt.X("x_right:Q", scale=alt.Scale(domain=[VISUAL_Z_MIN - VISUAL_X_PAD, VISUAL_Z_MAX + VISUAL_X_PAD]), axis=None),
             y=alt.Y("quality:N", sort=quality_order),
             text="right_txt:N",
         )
@@ -1285,7 +1352,7 @@ def _plot_quality_reference_interactive(quality_df: pd.DataFrame, selected_team:
         for _, r in tmp.iterrows():
             # Clip and snap to a small grid for a cleaner "dot-line" reference look.
             x_raw = float(r[col])
-            x = max(-2.8, min(2.8, x_raw))
+            x = max(VISUAL_Z_MIN, min(VISUAL_Z_MAX, x_raw))
             x_snap = round(x / 0.10) * 0.10
             rows.append(
                 {
@@ -1310,9 +1377,9 @@ def _plot_quality_reference_interactive(quality_df: pd.DataFrame, selected_team:
         yy = y_map[label]
         fig.add_shape(
             type="line",
-            x0=-2.95,
+            x0=VISUAL_Z_MIN + 0.03,
             y0=yy,
-            x1=2.95,
+            x1=VISUAL_Z_MAX - 0.03,
             y1=yy,
             line=dict(color="rgba(159,189,182,0.45)", width=1),
             layer="below",
@@ -1345,7 +1412,7 @@ def _plot_quality_reference_interactive(quality_df: pd.DataFrame, selected_team:
     if not sel_df.empty:
         fig.add_trace(
             go.Scatter(
-                x=sel_df["x_raw"],
+                x=np.clip(sel_df["x_raw"].astype(float), VISUAL_Z_MIN, VISUAL_Z_MAX),
                 y=sel_df["y"],
                 mode="markers",
                 name=selected_team,
@@ -1374,7 +1441,7 @@ def _plot_quality_reference_interactive(quality_df: pd.DataFrame, selected_team:
         legend=dict(orientation="h", yanchor="bottom", y=1.00, xanchor="right", x=1.0),
     )
     fig.update_xaxes(
-        range=[-3, 3],
+        range=[VISUAL_Z_MIN - VISUAL_X_PAD, VISUAL_Z_MAX + VISUAL_X_PAD],
         showgrid=False,
         tickvals=[-2, 0, 2],
         ticktext=["Low", "Average", "High"],
@@ -2291,6 +2358,11 @@ def _build_corner_wordalisation_context(
     ]
     q_cols = [c for c in q_cols if c in q_df.columns]
     league_quality_table = q_df[q_cols].copy() if q_cols else pd.DataFrame()
+    target_zone_style_map = {}
+    if {"team_name", "near_post_pct", "central_pct", "far_post_pct"}.issubset(set(context_df.columns)):
+        for _, r in context_df[["team_name", "near_post_pct", "central_pct", "far_post_pct"]].iterrows():
+            team = str(r["team_name"])
+            target_zone_style_map[team] = _target_zone_style_label(r.get("near_post_pct"), r.get("central_pct"), r.get("far_post_pct"))
     if not league_quality_table.empty:
         for col in [c for c in q_cols if c != "team_name"]:
             league_quality_table[col] = pd.to_numeric(league_quality_table[col], errors="coerce").round(3)
@@ -2306,6 +2378,8 @@ def _build_corner_wordalisation_context(
                 "q_transition_risk": "transition protection after corners",
             }
         )
+        if "team" in league_quality_table.columns:
+            league_quality_table["target zone style"] = league_quality_table["team"].map(target_zone_style_map).fillna("unknown")
 
     metric_cols = [
         "team_name",
@@ -2351,6 +2425,43 @@ def _build_corner_wordalisation_context(
             }
         )
 
+    selected_quality_profile = {}
+    selected_vs_team_quality_comparison = []
+    selected_row = q_df[q_df["team_name"].astype(str) == str(selected_team)]
+    if not selected_row.empty:
+        sr = selected_row.iloc[0]
+        selected_quality_profile = {
+            "target zone style": target_zone_style_map.get(str(selected_team), "unknown"),
+            "shot and chance threat": _quality_level_text("q_shot_goal_threat", sr.get("q_shot_goal_threat")),
+            "threat style": _quality_level_text("q_threat_style", sr.get("q_threat_style")),
+            "short vs direct": _quality_level_text("q_short_vs_direct", sr.get("q_short_vs_direct")),
+            "open vs closed": _quality_level_text("q_open_vs_closed", sr.get("q_open_vs_closed")),
+            "aerial threat": _quality_level_text("q_header_threat", sr.get("q_header_threat")),
+            "transition protection": _quality_level_text("q_transition_risk", sr.get("q_transition_risk")),
+        }
+        compare_cols = [
+            ("q_shot_goal_threat", "shot and chance threat"),
+            ("q_threat_style", "threat style"),
+            ("q_short_vs_direct", "short vs direct"),
+            ("q_open_vs_closed", "open vs closed"),
+            ("q_header_threat", "aerial threat"),
+            ("q_transition_risk", "transition protection"),
+        ]
+        others = q_df[q_df["team_name"].astype(str) != str(selected_team)].copy()
+        for _, orow in others.iterrows():
+            opp_team = str(orow["team_name"])
+            comp = {"team": opp_team}
+            sel_tz = target_zone_style_map.get(str(selected_team), "unknown")
+            opp_tz = target_zone_style_map.get(opp_team, "unknown")
+            comp["target zone orientation"] = (
+                "similar_orientation"
+                if sel_tz == opp_tz and sel_tz != "unknown"
+                else "different_orientation"
+            )
+            for col, label in compare_cols:
+                comp[label] = _compare_quality(sr.get(col), orow.get(col), clear_diff=CLEAR_DIFF)
+            selected_vs_team_quality_comparison.append(comp)
+
     available_teams = (
         sorted(context_df["team_name"].dropna().astype(str).unique().tolist())
         if "team_name" in context_df.columns
@@ -2368,6 +2479,8 @@ def _build_corner_wordalisation_context(
         f"Chance generation: shots per corner={shot_rate:.3f}, xG per corner={xg_per_corner:.3f}, total corner-assisted xG={total_xg:.3f}\n"
         f"Second-phase reliance: share of corner shots in second-phase situations={phase2_share:.1f}%\n"
         f"Defensive outcomes after own corners: total xG conceded from opponent corners={conceded_xg_total:.3f}, xG conceded per opponent corner={conceded_xg_per_opp_corner:.3f}, conceded shot body-part profile={conceded_body_part}\n"
+        f"Selected team quality levels (high>={HIGH}, low<={LOW}): {selected_quality_profile}\n"
+        f"Selected team vs each opponent (clear diff>={CLEAR_DIFF}): {selected_vs_team_quality_comparison}\n"
         f"League quality table (all teams): {league_quality_table.to_dict(orient='records') if not league_quality_table.empty else []}\n"
         f"League metric table (all teams): {league_metric_table.to_dict(orient='records') if not league_metric_table.empty else []}\n"
         "Definitions: phase 1 is first-contact play from the initial delivery; phase 2 is second-ball/recycled play after first contact.\n"
