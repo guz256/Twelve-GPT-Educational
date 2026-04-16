@@ -51,8 +51,10 @@ STRUCTURE:
 - Cover: overall corner style, strengths, chance-generation pathway (phase 1 vs phase 2), and weaknesses/trade-offs.
 - Write concise, professional, analyst-grade text.
 - In sentence 1, keep one clear core idea: delivery profile + targeting tendency.
-- For first-contact interpretation, avoid technical labels like "first-contact involvement is moderate"; prefer natural phrasing such as "they generate some presence at first contact, but not consistently".
-- In comparisons, vary connectors (e.g. "In contrast", "By comparison", "The key difference is") instead of repeating the same "X while Y" pattern every sentence.
+- For first-contact interpretation, avoid technical labels like "first-contact involvement is moderate"; 
+prefer natural phrasing such as "they generate some presence at first contact, but not consistently".
+- In comparisons, vary connectors (e.g. "In contrast", "By comparison", "The key difference is") 
+instead of repeating the same "X while Y" pattern every sentence.
 - Write as one continuous paragraph by default.
 - Do not use mini-headings, section labels, or clause labels with colons (e.g. "Initial delivery:" or "Strengths and trade-offs:").
 

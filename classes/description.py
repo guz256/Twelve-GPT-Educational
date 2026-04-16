@@ -15,12 +15,15 @@ from classes.data_source import PersonStat
 
 import json
 
-from settings import USE_GEMINI
-
-if USE_GEMINI:
-    from settings import USE_GEMINI, GEMINI_API_KEY, GEMINI_CHAT_MODEL
-else:
-    from settings import GPT_BASE, GPT_VERSION, GPT_KEY, GPT_ENGINE
+from settings import (
+    USE_GEMINI,
+    GEMINI_API_KEY,
+    GEMINI_CHAT_MODEL,
+    GPT_BASE,
+    GPT_VERSION,
+    GPT_KEY,
+    GPT_ENGINE,
+)
 
 import streamlit as st
 import random
@@ -180,7 +183,15 @@ class Description(ABC):
 
         st.expander("Chat transcript", expanded=False).write(self.messages)
 
-        if USE_GEMINI:
+        if USE_GEMINI and not GEMINI_API_KEY:
+            raise ValueError(
+                "USE_GEMINI=true but GEMINI_API_KEY is missing. "
+                "Set GEMINI_API_KEY in .streamlit/secrets.toml (or env GOOGLE_API_KEY)."
+            )
+
+        use_gemini = bool(USE_GEMINI and GEMINI_API_KEY and GEMINI_CHAT_MODEL)
+
+        if use_gemini:
             import google.generativeai as genai
 
             converted_msgs = convert_messages_format(self.messages)
@@ -200,6 +211,23 @@ class Description(ABC):
             answer = response.text
         else:
             # Use OpenAI API
+            missing = [
+                key
+                for key, value in {
+                    "GPT_BASE": GPT_BASE,
+                    "GPT_VERSION": GPT_VERSION,
+                    "GPT_KEY": GPT_KEY,
+                    "GPT_ENGINE/GPT_CHAT_MODEL": GPT_ENGINE,
+                }.items()
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "OpenAI/Azure config is incomplete. Missing: "
+                    + ", ".join(missing)
+                    + ". If you want Gemini, set USE_GEMINI=true and provide GEMINI_API_KEY."
+                )
+
             openai.api_type = "azure"
             openai.api_base = GPT_BASE
             openai.api_version = GPT_VERSION
